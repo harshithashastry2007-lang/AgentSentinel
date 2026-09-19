@@ -40,6 +40,10 @@ from gateway.models import (
     PolicyDecision,
     ToolInvocationRequest,
 )
+from gateway.threat_models import (
+    ThreatAnalysisRequest,
+    ThreatAssessment,
+)
 from security.approval_service import (
     ApprovalNotFoundError,
     ApprovalService,
@@ -53,6 +57,7 @@ from security.dependencies import (
 from security.execution_service import SecureExecutionService
 from security.identity import AgentAuthenticator, AuthenticationError
 from security.policy_engine import PolicyEngine
+from security.threat_detector import ThreatDetector
 from security.token_service import TokenService
 
 
@@ -320,3 +325,28 @@ async def execute_tool_action(
     ).execute(execution_request)
 
     return response
+
+@app.post(
+    "/v1/threats/analyze",
+    response_model=ThreatAssessment,
+    tags=["Threat Detection"],
+)
+async def analyze_runtime_threat(
+    request: ThreatAnalysisRequest,
+    claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("threat:analyze")),
+    ],
+) -> ThreatAssessment:
+    invocation = request.invocation
+
+    if (
+        invocation.agent_id != claims.sub
+        or invocation.session_id != claims.session_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token identity does not match request context",
+        )
+
+    return ThreatDetector().analyze(invocation)

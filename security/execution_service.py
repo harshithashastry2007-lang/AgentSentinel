@@ -10,9 +10,15 @@ from gateway.execution_models import (
     SecureExecutionRequest,
     SecureExecutionResponse,
 )
-from gateway.models import Decision, PolicyDecision
+from gateway.models import (
+    Decision,
+    PolicyDecision,
+    RiskLevel,
+)
+from gateway.threat_models import ThreatAssessment
 from security.approval_service import ApprovalService
 from security.policy_engine import PolicyEngine
+from security.threat_detector import ThreatDetector
 from security.tool_executor import (
     SandboxToolExecutor,
     ToolExecutionError,
@@ -21,7 +27,7 @@ from security.tool_executor import (
 
 
 class SecureExecutionService:
-    """Applies policy and approval controls before tool execution."""
+    """Applies threat, policy, and approval controls."""
 
     def __init__(
         self,
@@ -29,6 +35,7 @@ class SecureExecutionService:
     ) -> None:
         self.session = session
         self.policy_engine = PolicyEngine()
+        self.threat_detector = ThreatDetector()
         self.executor = SandboxToolExecutor()
 
     async def execute(
@@ -37,14 +44,59 @@ class SecureExecutionService:
     ) -> tuple[SecureExecutionResponse, PolicyDecision]:
         invocation = execution_request.invocation
         decision = self.policy_engine.evaluate(invocation)
+        threat_assessment = self.threat_detector.analyze(
+            invocation
+        )
+
+        if threat_assessment.blocked:
+            threat_reasons = [
+                finding.reason
+                for finding in threat_assessment.findings
+            ]
+            decision = decision.model_copy(
+                update={
+                    "decision": Decision.DENY,
+                    "risk_level": RiskLevel.CRITICAL,
+                    "risk_score": max(
+                        decision.risk_score,
+                        threat_assessment.threat_score,
+                    ),
+                    "reasons": (
+                        decision.reasons + threat_reasons
+                    ),
+                    "required_controls": sorted(
+                        {
+                            *decision.required_controls,
+                            "runtime_threat_block",
+                        }
+                    ),
+                }
+            )
+
+            return (
+                self._response(
+                    execution_request=execution_request,
+                    decision=decision,
+                    threat_assessment=threat_assessment,
+                    status=ExecutionStatus.BLOCKED,
+                    message=(
+                        "Execution blocked by runtime "
+                        "threat detection"
+                    ),
+                ),
+                decision,
+            )
 
         if decision.decision == Decision.DENY:
             return (
                 self._response(
                     execution_request=execution_request,
                     decision=decision,
+                    threat_assessment=threat_assessment,
                     status=ExecutionStatus.BLOCKED,
-                    message="Execution blocked by zero-trust policy",
+                    message=(
+                        "Execution blocked by zero-trust policy"
+                    ),
                 ),
                 decision,
             )
@@ -77,6 +129,7 @@ class SecureExecutionService:
                     self._response(
                         execution_request=execution_request,
                         decision=decision,
+                        threat_assessment=threat_assessment,
                         status=(
                             ExecutionStatus.APPROVAL_REQUIRED
                         ),
@@ -99,6 +152,7 @@ class SecureExecutionService:
                 self._response(
                     execution_request=execution_request,
                     decision=decision,
+                    threat_assessment=threat_assessment,
                     status=ExecutionStatus.BLOCKED,
                     approval_id=approval_id,
                     message=str(exc),
@@ -110,6 +164,7 @@ class SecureExecutionService:
                 self._response(
                     execution_request=execution_request,
                     decision=decision,
+                    threat_assessment=threat_assessment,
                     status=ExecutionStatus.FAILED,
                     approval_id=approval_id,
                     message=str(exc),
@@ -121,6 +176,7 @@ class SecureExecutionService:
             self._response(
                 execution_request=execution_request,
                 decision=decision,
+                threat_assessment=threat_assessment,
                 status=ExecutionStatus.EXECUTED,
                 approval_id=approval_id,
                 output=output,
@@ -180,6 +236,7 @@ class SecureExecutionService:
     def _response(
         execution_request: SecureExecutionRequest,
         decision: PolicyDecision,
+        threat_assessment: ThreatAssessment,
         status: ExecutionStatus,
         message: str,
         approval_id: str | None = None,
@@ -195,5 +252,6 @@ class SecureExecutionService:
             approval_id=approval_id,
             output=output or {},
             risk_score=decision.risk_score,
+            threat_assessment=threat_assessment,
             message=message,
         )
