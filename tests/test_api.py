@@ -361,3 +361,92 @@ def test_agent_without_audit_scope_cannot_verify_integrity(
     assert response.json()["detail"] == (
         "Missing required capability scopes: audit:read"
     )
+def test_risky_action_completes_human_approval_workflow(
+    authenticated_client: TestClient,
+) -> None:
+    policy_token = issue_test_token(
+        authenticated_client,
+        ["policy:evaluate"],
+    )
+
+    evaluation_response = authenticated_client.post(
+        "/v1/evaluate",
+        headers={"Authorization": f"Bearer {policy_token}"},
+        json={
+            "agent_id": "demo-agent-01",
+            "session_id": "session-201",
+            "tool_name": "filesystem",
+            "action": "write_file",
+            "target": "report.txt",
+        },
+    )
+
+    evaluation = evaluation_response.json()
+
+    assert evaluation_response.status_code == 200
+    assert evaluation["decision"] == "require_approval"
+    assert evaluation["approval_id"] is not None
+
+    approval_id = evaluation["approval_id"]
+
+    approval_token = issue_test_token(
+        authenticated_client,
+        ["approval:read", "approval:write"],
+    )
+
+    list_response = authenticated_client.get(
+        "/v1/approvals",
+        headers={"Authorization": f"Bearer {approval_token}"},
+    )
+
+    assert list_response.status_code == 200
+    assert any(
+        approval["approval_id"] == approval_id
+        for approval in list_response.json()["approvals"]
+    )
+
+    decision_response = authenticated_client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        headers={"Authorization": f"Bearer {approval_token}"},
+        json={
+            "action": "approve",
+            "approver_id": "security-admin-01",
+            "comment": "Reviewed and approved",
+        },
+    )
+
+    approved = decision_response.json()
+
+    assert decision_response.status_code == 200
+    assert approved["status"] == "approved"
+    assert approved["approver_id"] == "security-admin-01"
+
+    repeated_response = authenticated_client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        headers={"Authorization": f"Bearer {approval_token}"},
+        json={
+            "action": "reject",
+            "approver_id": "security-admin-01",
+        },
+    )
+
+    assert repeated_response.status_code == 409
+
+
+def test_agent_without_approval_scope_is_rejected(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["policy:evaluate"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/approvals",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing required capability scopes: approval:read"
+    )

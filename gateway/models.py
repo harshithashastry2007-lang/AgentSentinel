@@ -45,4 +45,5 @@ class PolicyDecision(BaseModel):
     risk_score: int = Field(ge=0, le=100)
     reasons: list[str] = Field(default_factory=list)
     required_controls: list[str] = Field(default_factory=list)
+    approval_id: str | None = None
     evaluated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

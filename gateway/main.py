@@ -13,11 +13,15 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gateway.approval_models import (
+    ApprovalDecisionRequest,
+    ApprovalListResponse,
+    ApprovalResponse,
+)
 from gateway.audit_schemas import (
     AuditEventListResponse,
     AuditIntegrityResponse,
 )
-
 from gateway.auth_models import (
     CapabilityClaims,
     CapabilityTokenRequest,
@@ -27,7 +31,16 @@ from gateway.database import (
     create_database_tables,
     get_database_session,
 )
-from gateway.models import PolicyDecision, ToolInvocationRequest
+from gateway.models import (
+    Decision,
+    PolicyDecision,
+    ToolInvocationRequest,
+)
+from security.approval_service import (
+    ApprovalNotFoundError,
+    ApprovalService,
+    ApprovalStateError,
+)
 from security.audit_service import AuditService
 from security.dependencies import (
     get_token_service,
@@ -136,12 +149,87 @@ async def evaluate_tool_invocation(
 
     decision = PolicyEngine().evaluate(request)
 
+    if decision.decision == Decision.REQUIRE_APPROVAL:
+        approval = await ApprovalService(
+            database_session
+        ).create(
+            request=request,
+            decision=decision,
+        )
+        decision = decision.model_copy(
+            update={"approval_id": approval.approval_id}
+        )
+
     await AuditService(database_session).record(
         request=request,
         decision=decision,
     )
 
     return decision
+
+
+@app.get(
+    "/v1/approvals",
+    response_model=ApprovalListResponse,
+    tags=["Approvals"],
+)
+async def list_pending_approvals(
+    _claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("approval:read")),
+    ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> ApprovalListResponse:
+    approvals = await ApprovalService(
+        database_session
+    ).list_pending(limit=limit)
+
+    return ApprovalListResponse(
+        approvals=approvals,
+        count=len(approvals),
+    )
+
+
+@app.post(
+    "/v1/approvals/{approval_id}/decision",
+    response_model=ApprovalResponse,
+    tags=["Approvals"],
+)
+async def resolve_approval(
+    approval_id: str,
+    resolution: ApprovalDecisionRequest,
+    _claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("approval:write")),
+    ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
+) -> ApprovalResponse:
+    try:
+        approval = await ApprovalService(
+            database_session
+        ).resolve(
+            approval_id=approval_id,
+            resolution=resolution,
+        )
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval request not found",
+        ) from exc
+    except ApprovalStateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    return ApprovalResponse.model_validate(approval)
 
 
 @app.get(
@@ -168,6 +256,7 @@ async def list_audit_events(
         events=events,
         count=len(events),
     )
+
 
 @app.get(
     "/v1/audit/integrity",
