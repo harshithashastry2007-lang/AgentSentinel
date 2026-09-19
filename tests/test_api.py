@@ -699,3 +699,63 @@ def test_path_traversal_is_blocked_before_execution(
         finding["threat_type"] == "path_traversal"
         for finding in body["threat_assessment"]["findings"]
     )
+
+def test_dashboard_summary_is_available(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["dashboard:read"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/dashboard/summary",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["total_evaluations"] >= 0
+    assert body["allowed"] >= 0
+    assert body["denied"] >= 0
+    assert body["required_approval"] >= 0
+    assert body["pending_approvals"] >= 0
+    assert body["critical_events"] >= 0
+    assert 0 <= body["average_risk_score"] <= 100
+    assert body["audit_chain_valid"] is True
+    assert body["active_protection"] is True
+
+
+def test_dashboard_requires_correct_scope(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["policy:evaluate"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/dashboard/summary",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing required capability scopes: dashboard:read"
+    )
+
+
+def test_prometheus_metrics_are_exposed(
+    authenticated_client: TestClient,
+) -> None:
+    authenticated_client.get("/health")
+
+    response = authenticated_client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "agentsentinel_http_requests_total" in response.text
+    assert (
+        "agentsentinel_http_request_duration_seconds"
+        in response.text
+    )

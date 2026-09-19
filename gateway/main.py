@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import perf_counter
 from typing import Annotated
 
 from fastapi import (
@@ -9,8 +10,11 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
+    Response,
     status,
 )
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gateway.approval_models import (
@@ -27,6 +31,7 @@ from gateway.auth_models import (
     CapabilityTokenRequest,
     CapabilityTokenResponse,
 )
+from gateway.dashboard_models import DashboardSummary
 from gateway.database import (
     create_database_tables,
     get_database_session,
@@ -34,6 +39,13 @@ from gateway.database import (
 from gateway.execution_models import (
     SecureExecutionRequest,
     SecureExecutionResponse,
+)
+from gateway.metrics import (
+    HTTP_REQUEST_DURATION_SECONDS,
+    HTTP_REQUESTS_TOTAL,
+    POLICY_DECISIONS_TOTAL,
+    THREATS_DETECTED_TOTAL,
+    TOOL_EXECUTIONS_TOTAL,
 )
 from gateway.models import (
     Decision,
@@ -50,6 +62,7 @@ from security.approval_service import (
     ApprovalStateError,
 )
 from security.audit_service import AuditService
+from security.dashboard_service import DashboardService
 from security.dependencies import (
     get_token_service,
     require_capability,
@@ -77,6 +90,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.middleware("http")
+async def monitor_http_requests(
+    request: Request,
+    call_next: object,
+) -> Response:
+    started_at = perf_counter()
+    response = await call_next(request)
+
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path)
+
+    HTTP_REQUESTS_TOTAL.labels(
+        method=request.method,
+        path=path,
+        status_code=str(response.status_code),
+    ).inc()
+
+    HTTP_REQUEST_DURATION_SECONDS.labels(
+        method=request.method,
+        path=path,
+    ).observe(perf_counter() - started_at)
+
+    return response
 
 def get_authenticator() -> AgentAuthenticator:
     return AgentAuthenticator()
@@ -158,6 +194,10 @@ async def evaluate_tool_invocation(
         )
 
     decision = PolicyEngine().evaluate(request)
+    POLICY_DECISIONS_TOTAL.labels(
+        decision=decision.decision.value,
+        risk_level=decision.risk_level.value,
+    ).inc()
 
     if decision.decision == Decision.REQUIRE_APPROVAL:
         approval = await ApprovalService(
@@ -320,9 +360,22 @@ async def execute_tool_action(
             detail="Token identity does not match request context",
         )
 
+       
     response, _decision = await SecureExecutionService(
         database_session
     ).execute(execution_request)
+
+    TOOL_EXECUTIONS_TOTAL.labels(
+        status=response.status.value,
+        tool_name=response.tool_name,
+    ).inc()
+
+    if response.threat_assessment is not None:
+        for finding in response.threat_assessment.findings:
+            THREATS_DETECTED_TOTAL.labels(
+                threat_type=finding.threat_type.value,
+                severity=finding.severity.value,
+            ).inc()
 
     return response
 
@@ -349,4 +402,50 @@ async def analyze_runtime_threat(
             detail="Token identity does not match request context",
         )
 
-    return ThreatDetector().analyze(invocation)
+    if (
+        invocation.agent_id != claims.sub
+        or invocation.session_id != claims.session_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token identity does not match request context",
+        )
+
+    assessment = ThreatDetector().analyze(invocation)
+
+    for finding in assessment.findings:
+        THREATS_DETECTED_TOTAL.labels(
+            threat_type=finding.threat_type.value,
+            severity=finding.severity.value,
+        ).inc()
+
+    return assessment
+
+@app.get(
+    "/v1/dashboard/summary",
+    response_model=DashboardSummary,
+    tags=["Dashboard"],
+)
+async def get_dashboard_summary(
+    _claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("dashboard:read")),
+    ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
+) -> DashboardSummary:
+    return await DashboardService(
+        database_session
+    ).get_summary()
+
+@app.get(
+    "/metrics",
+    include_in_schema=False,
+)
+async def prometheus_metrics() -> Response:
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
