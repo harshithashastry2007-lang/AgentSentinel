@@ -1,0 +1,40 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and runtime data
+*.log
+logs/
+runtime_data/
+
+# Frontend dependencies and builds
+frontend/node_modules/
+frontend/dist/
+node_modules/
+dist/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Coverage files
+.coverage
+htmlcov/
