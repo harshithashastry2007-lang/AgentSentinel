@@ -1,14 +1,34 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    status,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from gateway.audit_schemas import (
+    AuditEventListResponse,
+    AuditIntegrityResponse,
+)
 
 from gateway.auth_models import (
     CapabilityClaims,
     CapabilityTokenRequest,
     CapabilityTokenResponse,
 )
+from gateway.database import (
+    create_database_tables,
+    get_database_session,
+)
 from gateway.models import PolicyDecision, ToolInvocationRequest
+from security.audit_service import AuditService
 from security.dependencies import (
     get_token_service,
     require_capability,
@@ -17,6 +37,13 @@ from security.identity import AgentAuthenticator, AuthenticationError
 from security.policy_engine import PolicyEngine
 from security.token_service import TokenService
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await create_database_tables()
+    yield
+
+
 app = FastAPI(
     title="AgentSentinel",
     description=(
@@ -24,6 +51,7 @@ app = FastAPI(
         "for Autonomous AI Agents and MCP Tools"
     ),
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -92,6 +120,10 @@ async def evaluate_tool_invocation(
         CapabilityClaims,
         Depends(require_capability("policy:evaluate")),
     ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
 ) -> PolicyDecision:
     if (
         request.agent_id != claims.sub
@@ -102,4 +134,62 @@ async def evaluate_tool_invocation(
             detail="Token identity does not match request context",
         )
 
-    return PolicyEngine().evaluate(request)
+    decision = PolicyEngine().evaluate(request)
+
+    await AuditService(database_session).record(
+        request=request,
+        decision=decision,
+    )
+
+    return decision
+
+
+@app.get(
+    "/v1/audit/events",
+    response_model=AuditEventListResponse,
+    tags=["Audit"],
+)
+async def list_audit_events(
+    _claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("audit:read")),
+    ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> AuditEventListResponse:
+    events = await AuditService(database_session).list_recent(
+        limit=limit,
+    )
+
+    return AuditEventListResponse(
+        events=events,
+        count=len(events),
+    )
+
+@app.get(
+    "/v1/audit/integrity",
+    response_model=AuditIntegrityResponse,
+    tags=["Audit"],
+)
+async def verify_audit_integrity(
+    _claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("audit:read")),
+    ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
+) -> AuditIntegrityResponse:
+    valid, event_count, broken_event_id = (
+        await AuditService(database_session).verify_chain()
+    )
+
+    return AuditIntegrityResponse(
+        valid=valid,
+        event_count=event_count,
+        broken_event_id=broken_event_id,
+    )

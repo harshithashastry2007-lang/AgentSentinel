@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     app_name: str = "AgentSentinel"
     environment: str = "development"
+    database_url: str = "sqlite+aiosqlite:///./runtime_data/agentsentinel.db"
 
     jwt_secret: SecretStr
     jwt_algorithm: str = "HS256"

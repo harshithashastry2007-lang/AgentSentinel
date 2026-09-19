@@ -267,3 +267,97 @@ def test_token_cannot_be_reused_in_another_session(
     assert response.json()["detail"] == (
         "Token identity does not match request context"
     )
+def test_agent_with_audit_scope_can_read_events(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["audit:read"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/audit/events?limit=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert "events" in body
+    assert "count" in body
+    assert body["count"] == len(body["events"])
+    assert body["count"] <= 10
+
+
+def test_agent_without_audit_scope_cannot_read_events(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["policy:evaluate"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/audit/events",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing required capability scopes: audit:read"
+    )
+
+
+def test_audit_event_limit_is_validated(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["audit:read"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/audit/events?limit=201",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+
+def test_agent_with_audit_scope_can_verify_integrity(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["audit:read"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/audit/integrity",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["valid"] is True
+    assert body["event_count"] >= 0
+    assert body["broken_event_id"] is None
+
+
+def test_agent_without_audit_scope_cannot_verify_integrity(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["policy:evaluate"],
+    )
+
+    response = authenticated_client.get(
+        "/v1/audit/integrity",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing required capability scopes: audit:read"
+    )
