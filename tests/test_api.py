@@ -450,3 +450,145 @@ def test_agent_without_approval_scope_is_rejected(
     assert response.json()["detail"] == (
         "Missing required capability scopes: approval:read"
     )
+def test_allowlisted_calculator_executes_in_sandbox(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["tool:execute"],
+    )
+
+    response = authenticated_client.post(
+        "/v1/execute",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "invocation": {
+                "agent_id": "demo-agent-01",
+                "session_id": "session-201",
+                "tool_name": "calculator",
+                "action": "add",
+                "arguments": {
+                    "left": 7,
+                    "right": 5,
+                },
+            }
+        },
+    )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "executed"
+    assert body["output"]["result"] == 12
+
+
+def test_dangerous_system_command_is_blocked(
+    authenticated_client: TestClient,
+) -> None:
+    token = issue_test_token(
+        authenticated_client,
+        ["tool:execute"],
+    )
+
+    response = authenticated_client.post(
+        "/v1/execute",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "invocation": {
+                "agent_id": "demo-agent-01",
+                "session_id": "session-201",
+                "tool_name": "powershell",
+                "action": "execute_command",
+                "arguments": {
+                    "command": "example-command",
+                },
+                "requested_scopes": ["shell:execute"],
+                "target": "C:/Windows/System32",
+            }
+        },
+    )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "blocked"
+    assert body["risk_score"] == 100
+    assert body["output"] == {}
+
+
+def test_approved_write_executes_only_in_virtual_workspace(
+    authenticated_client: TestClient,
+) -> None:
+    execution_token = issue_test_token(
+        authenticated_client,
+        ["tool:execute"],
+    )
+
+    execution_payload = {
+        "invocation": {
+            "agent_id": "demo-agent-01",
+            "session_id": "session-201",
+            "tool_name": "filesystem",
+            "action": "write_file",
+            "arguments": {
+                "path": "workspace/report.txt",
+                "content": "Approved AgentSentinel output",
+            },
+            "target": "workspace/report.txt",
+        }
+    }
+
+    first_response = authenticated_client.post(
+        "/v1/execute",
+        headers={
+            "Authorization": f"Bearer {execution_token}"
+        },
+        json=execution_payload,
+    )
+
+    first_body = first_response.json()
+
+    assert first_response.status_code == 200
+    assert first_body["status"] == "approval_required"
+    assert first_body["approval_id"] is not None
+
+    approval_id = first_body["approval_id"]
+    execution_payload["approval_id"] = approval_id
+    execution_payload["invocation"]["request_id"] = (
+        first_body["request_id"]
+    )
+
+    approval_token = issue_test_token(
+        authenticated_client,
+        ["approval:write"],
+    )
+
+    approval_response = authenticated_client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        headers={
+            "Authorization": f"Bearer {approval_token}"
+        },
+        json={
+            "action": "approve",
+            "approver_id": "security-admin-01",
+            "comment": "Approved for sandbox execution",
+        },
+    )
+
+    assert approval_response.status_code == 200
+    assert approval_response.json()["status"] == "approved"
+
+    execution_response = authenticated_client.post(
+        "/v1/execute",
+        headers={
+            "Authorization": f"Bearer {execution_token}"
+        },
+        json=execution_payload,
+    )
+
+    executed = execution_response.json()
+
+    assert execution_response.status_code == 200
+    assert executed["status"] == "executed"
+    assert executed["output"]["sandboxed"] is True
+    assert executed["output"]["bytes_written"] > 0

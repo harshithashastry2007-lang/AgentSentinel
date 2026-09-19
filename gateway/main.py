@@ -31,6 +31,10 @@ from gateway.database import (
     create_database_tables,
     get_database_session,
 )
+from gateway.execution_models import (
+    SecureExecutionRequest,
+    SecureExecutionResponse,
+)
 from gateway.models import (
     Decision,
     PolicyDecision,
@@ -46,6 +50,7 @@ from security.dependencies import (
     get_token_service,
     require_capability,
 )
+from security.execution_service import SecureExecutionService
 from security.identity import AgentAuthenticator, AuthenticationError
 from security.policy_engine import PolicyEngine
 from security.token_service import TokenService
@@ -282,3 +287,36 @@ async def verify_audit_integrity(
         event_count=event_count,
         broken_event_id=broken_event_id,
     )
+
+@app.post(
+    "/v1/execute",
+    response_model=SecureExecutionResponse,
+    tags=["Execution"],
+)
+async def execute_tool_action(
+    execution_request: SecureExecutionRequest,
+    claims: Annotated[
+        CapabilityClaims,
+        Depends(require_capability("tool:execute")),
+    ],
+    database_session: Annotated[
+        AsyncSession,
+        Depends(get_database_session),
+    ],
+) -> SecureExecutionResponse:
+    invocation = execution_request.invocation
+
+    if (
+        invocation.agent_id != claims.sub
+        or invocation.session_id != claims.session_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token identity does not match request context",
+        )
+
+    response, _decision = await SecureExecutionService(
+        database_session
+    ).execute(execution_request)
+
+    return response
