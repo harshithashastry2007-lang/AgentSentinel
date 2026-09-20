@@ -14,6 +14,7 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,12 +84,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="AgentSentinel",
     description=(
-        "Zero-Trust Runtime Security Gateway "
-        "for Autonomous AI Agents and MCP Tools"
+        "Zero-Trust Runtime Security Gateway for Autonomous AI Agents and MCP Tools"
     ),
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.middleware("http")
 async def monitor_http_requests(
@@ -113,6 +125,7 @@ async def monitor_http_requests(
     ).observe(perf_counter() - started_at)
 
     return response
+
 
 def get_authenticator() -> AgentAuthenticator:
     return AgentAuthenticator()
@@ -184,10 +197,7 @@ async def evaluate_tool_invocation(
         Depends(get_database_session),
     ],
 ) -> PolicyDecision:
-    if (
-        request.agent_id != claims.sub
-        or request.session_id != claims.session_id
-    ):
+    if request.agent_id != claims.sub or request.session_id != claims.session_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Token identity does not match request context",
@@ -200,15 +210,11 @@ async def evaluate_tool_invocation(
     ).inc()
 
     if decision.decision == Decision.REQUIRE_APPROVAL:
-        approval = await ApprovalService(
-            database_session
-        ).create(
+        approval = await ApprovalService(database_session).create(
             request=request,
             decision=decision,
         )
-        decision = decision.model_copy(
-            update={"approval_id": approval.approval_id}
-        )
+        decision = decision.model_copy(update={"approval_id": approval.approval_id})
 
     await AuditService(database_session).record(
         request=request,
@@ -234,9 +240,7 @@ async def list_pending_approvals(
     ],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> ApprovalListResponse:
-    approvals = await ApprovalService(
-        database_session
-    ).list_pending(limit=limit)
+    approvals = await ApprovalService(database_session).list_pending(limit=limit)
 
     return ApprovalListResponse(
         approvals=approvals,
@@ -262,9 +266,7 @@ async def resolve_approval(
     ],
 ) -> ApprovalResponse:
     try:
-        approval = await ApprovalService(
-            database_session
-        ).resolve(
+        approval = await ApprovalService(database_session).resolve(
             approval_id=approval_id,
             resolution=resolution,
         )
@@ -323,15 +325,16 @@ async def verify_audit_integrity(
         Depends(get_database_session),
     ],
 ) -> AuditIntegrityResponse:
-    valid, event_count, broken_event_id = (
-        await AuditService(database_session).verify_chain()
-    )
+    valid, event_count, broken_event_id = await AuditService(
+        database_session
+    ).verify_chain()
 
     return AuditIntegrityResponse(
         valid=valid,
         event_count=event_count,
         broken_event_id=broken_event_id,
     )
+
 
 @app.post(
     "/v1/execute",
@@ -351,19 +354,15 @@ async def execute_tool_action(
 ) -> SecureExecutionResponse:
     invocation = execution_request.invocation
 
-    if (
-        invocation.agent_id != claims.sub
-        or invocation.session_id != claims.session_id
-    ):
+    if invocation.agent_id != claims.sub or invocation.session_id != claims.session_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Token identity does not match request context",
         )
 
-       
-    response, _decision = await SecureExecutionService(
-        database_session
-    ).execute(execution_request)
+    response, _decision = await SecureExecutionService(database_session).execute(
+        execution_request
+    )
 
     TOOL_EXECUTIONS_TOTAL.labels(
         status=response.status.value,
@@ -379,6 +378,7 @@ async def execute_tool_action(
 
     return response
 
+
 @app.post(
     "/v1/threats/analyze",
     response_model=ThreatAssessment,
@@ -393,19 +393,13 @@ async def analyze_runtime_threat(
 ) -> ThreatAssessment:
     invocation = request.invocation
 
-    if (
-        invocation.agent_id != claims.sub
-        or invocation.session_id != claims.session_id
-    ):
+    if invocation.agent_id != claims.sub or invocation.session_id != claims.session_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Token identity does not match request context",
         )
 
-    if (
-        invocation.agent_id != claims.sub
-        or invocation.session_id != claims.session_id
-    ):
+    if invocation.agent_id != claims.sub or invocation.session_id != claims.session_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Token identity does not match request context",
@@ -420,6 +414,7 @@ async def analyze_runtime_threat(
         ).inc()
 
     return assessment
+
 
 @app.get(
     "/v1/dashboard/summary",
@@ -436,9 +431,8 @@ async def get_dashboard_summary(
         Depends(get_database_session),
     ],
 ) -> DashboardSummary:
-    return await DashboardService(
-        database_session
-    ).get_summary()
+    return await DashboardService(database_session).get_summary()
+
 
 @app.get(
     "/metrics",
